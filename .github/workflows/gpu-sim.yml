@@ -42,8 +42,9 @@ jobs:
           gpu: nvidia/h100
           cuda-toolkit: "13.0"
 
-      # ROOT, yaml-cpp and ninja come from conda-forge; torch 2.12.0 (the version the project builds against) is the CUDA 13.0
-      # wheel, matching the toolkit.
+      # ROOT, yaml-cpp and ninja come from conda-forge. torch is pinned to 2.12.0
+      # (the version the project builds against; newer releases need C++20), in
+      # its CUDA 13.0 wheel to match the toolkit.
       - name: Install ROOT, yaml-cpp and PyTorch
         run: |
           curl -sSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o "$RUNNER_TEMP/miniconda.sh"
@@ -80,11 +81,24 @@ jobs:
           print(torch.cuda.get_device_name(0), ctpwa.backend())
           assert ctpwa.backend() == 'cuda'"
 
+      # The CPU-backend tests skip themselves on a CUDA build. The step fails
+      # unless pytest exits 0 and reports at least 100 passed tests, so an empty
+      # or all-skipped run cannot go green.
       - name: Run the tests
         shell: bash
         run: |
           set -o pipefail
           export PYTHONPATH="$PWD"
           cd tests
-          vgpu run --preload python -m pytest . -v --tb=short -rfEs -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/pytest.log" || true
-          tail -30 "$RUNNER_TEMP/pytest.log"
+          vgpu run --preload python -m pytest . -v --tb=short -rfEs -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          summary=$(grep -E '^=+ .* in [0-9.]+s' "$RUNNER_TEMP/pytest.log" | tail -1)
+          echo "$summary"
+          if echo "$summary" | grep -qE '[0-9]+ (failed|error)'; then
+            echo "::error::pytest reported failures"
+            exit 1
+          fi
+          passed=$(echo "$summary" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
+          if [ "$passed" -lt 100 ]; then
+            echo "::error::only $passed tests passed"
+            exit 1
+          fi
